@@ -330,19 +330,28 @@ def ts_regression(data: pd.DataFrame, feature: str, label: str, n_periods: int, 
     :param rettype: 0 for resid, 1 for beta, 2 for alpha, 3 for y_hat, 4 for R^2
     :return:
     """
-    beta = ts_beta(data, feature, label, n_periods)
-    alpha: pd.Series = ts_mean(data[label], n_periods) - beta * ts_mean(data[feature], n_periods)
-    predict: pd.Series = beta * data[feature] + alpha
-    resid: pd.Series = data[label] - predict
     if rettype == 0:
+        beta = ts_beta(data, feature, label, n_periods)
+        alpha: pd.Series = ts_mean(data[label], n_periods) - beta * ts_mean(data[feature], n_periods)
+        predict: pd.Series = beta * data[feature] + alpha
+        resid: pd.Series = data[label] - predict
         return resid
     elif rettype == 1:
+        beta = ts_beta(data, feature, label, n_periods)
         return beta
     elif rettype == 2:
+        beta = ts_beta(data, feature, label, n_periods)
+        alpha: pd.Series = ts_mean(data[label], n_periods) - beta * ts_mean(data[feature], n_periods)
         return alpha
     elif rettype == 3:
+        beta = ts_beta(data, feature, label, n_periods)
+        alpha: pd.Series = ts_mean(data[label], n_periods) - beta * ts_mean(data[feature], n_periods)
+        predict: pd.Series = beta * data[feature] + alpha
         return predict
     else:
+        beta = ts_beta(data, feature, label, n_periods)
+        alpha: pd.Series = ts_mean(data[label], n_periods) - beta * ts_mean(data[feature], n_periods)
+        predict: pd.Series = beta * data[feature] + alpha
         predict.name = "predict"
         concat_df = pd.concat([predict, data[label]], axis=1)
         return ts_corr(concat_df, "predict", label, n_periods) ** 2
@@ -393,6 +402,30 @@ def ts_decay_linear(data: pd.Series | pd.core.groupby.SeriesGroupBy, n_period: i
         return data.groupby(level=1).transform(lambda x: linear_decay(x, n_period))
     else:
         res: pd.Series = data.transform(lambda x: linear_decay(x, n_period))
+        res.index.names = ["datetime", "instrument"]
+        return res
+
+
+def ts_argmax(data: pd.Series | pd.core.groupby.SeriesGroupBy, n_period: int) -> pd.Series:
+    def argmax(feature: pd.Series) -> pd.Series:
+        return feature.rolling(n_period).apply(lambda x: np.argmax(x))
+
+    if isinstance(data, pd.Series):
+        return data.groupby(level=1).transform(lambda x: argmax(x))
+    else:
+        res = data.transform(lambda x: argmax(x))
+        res.index.names = ["datetime", "instrument"]
+        return res
+
+
+def ts_argmin(data: pd.Series | pd.core.groupby.SeriesGroupBy, n_period: int) -> pd.Series:
+    def argmin(feature: pd.Series) -> pd.Series:
+        return feature.rolling(n_period).apply(lambda x: np.argmin(x))
+
+    if isinstance(data, pd.Series):
+        return data.groupby(level=1).transform(lambda x: argmin(x))
+    else:
+        res = data.transform(lambda x: argmin(x))
         res.index.names = ["datetime", "instrument"]
         return res
 
@@ -536,13 +569,12 @@ def neutralize(data: pd.DataFrame | pd.Series, target: pd.Series, features: list
         result.name = f_name
         return result
 
-    if not isinstance(data, pd.DataFrame):
+    if isinstance(data, pd.Series):
         data = data.to_frame(name=data.name)
         RETTYPE = "series"
 
     target = target[target.index.isin(data.index)]
     concat_data = pd.concat([data, target], axis=1)
-
     target_name = target.name
     features = data.columns if features is None else features
     other_cols = [c for c in data.columns if c not in features]
