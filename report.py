@@ -41,7 +41,7 @@ def information_ratio(ret: pd.Series | pd.DataFrame, benchmark: pd.Series | pd.D
     """
     ret_copy = pd.Series(ret)
     benchmark_copy = pd.Series(benchmark)
-    return (ret_copy.mean() - benchmark_copy.mean()) / ret_copy.std()
+    return (ret_copy.mean() - benchmark_copy.mean()) / (ret_copy - benchmark_copy).std()
 
 
 def calc_drawdown(data: pd.Series) -> pd.Series:
@@ -236,12 +236,13 @@ def group_return_ana(pred: pd.DataFrame | pd.Series, y_true: pd.Series, n: int =
     """
     y_true.name = "label"
     y_true.index.names = pred.index.names
+
     if len(pred) > len(y_true):
         pred = pred[pred.index.isin(y_true.index)]
     else:
         y_true = y_true[y_true.index.isin(pred.index)]
+
     predict = pd.concat([pred, y_true], axis=1)
-    # print(predict)
     predict = predict.sort_values("predict", ascending=False)
     acc = accuracy(predict["predict"], predict["label"], sign=">=")
     print('Accuracy of Prediction:', acc)
@@ -267,6 +268,8 @@ def group_return_ana(pred: pd.DataFrame | pd.Series, y_true: pd.Series, n: int =
     win_rate = []
     mean_ret = []
     for c in cols:
+        # dt = t_df[c] + 1
+        # data.append(dt.cumprod() - 1)
         data.append(t_df[c].cumsum())
         label.append(c)
         win_rate.append(len(t_df[t_df[c] >= 0]) / len(t_df))

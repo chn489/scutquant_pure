@@ -1,17 +1,14 @@
-import numpy as np
-import pandas as pd
 import datetime
-import seaborn as sns
+from seaborn import kdeplot
 import matplotlib.pyplot as plt
-import math
 import xgboost
-from scipy.signal import periodogram
-from statsmodels.graphics.tsaplots import plot_pacf
 import lightgbm as lgb
 from sklearn import linear_model
 import pickle
 import random
 import warnings
+from .report import single_factor_ana
+from .operators import *
 
 warnings.filterwarnings("ignore")
 random.seed(2046)
@@ -41,7 +38,7 @@ def join_data(data: pd.DataFrame, data_join: pd.DataFrame, on: str = 'datetime',
     return result.set_index(index)
 
 
-def vlookup(df1: pd.DataFrame, df2: pd.DataFrame, lookup_key: str, datetime: str = "datetime",
+def vlookup(df1: pd.DataFrame, df2: pd.DataFrame, lookup_key: str, date: str = "datetime",
             raw: bool = False) -> pd.DataFrame:
     """
     通过给定df1的lookupkey, 在df2中查找符合条件的值并合并到df1中. 可用于处理另类数据、基本面数据与量价数据的合并
@@ -68,11 +65,11 @@ def vlookup(df1: pd.DataFrame, df2: pd.DataFrame, lookup_key: str, datetime: str
     df2.reset_index(inplace=True)
     original_keys = df1[lookup_key].copy()
     df1[lookup_key] = df1[lookup_key].apply(match)
-    merged = pd.merge(df1, df2, on=[datetime, lookup_key], how="outer")
+    merged = pd.merge(df1, df2, on=[date, lookup_key], how="outer")
     if raw:
         merged["key"] = df1[lookup_key]
         merged[lookup_key] = original_keys
-        merge = merged.set_index([datetime, lookup_key, "key"]).sort_index()
+        merge = merged.set_index([date, lookup_key, "key"]).sort_index()
         merge = merge[~merge.index.get_level_values(1).isnull()]
         return merge[~merge.index.get_level_values(2).isnull()]
     else:
@@ -105,51 +102,6 @@ def price2ret(price: pd.DataFrame | pd.Series, shift1: int = -1, shift2: int = -
     if fill:
         ret.fillna(0, inplace=True)
     return ret
-
-
-def zscorenorm(X: pd.DataFrame | pd.Series, mean=None, std=None, clip=3) -> pd.DataFrame | pd.Series:
-    if mean is None:
-        mean = X.mean()
-    if std is None:
-        std = X.std()
-    X -= mean
-    X /= std
-    if clip is not None:
-        X.clip(-clip, clip, inplace=True)
-    return X
-
-
-def robustzscorenorm(X: pd.DataFrame | pd.Series, median=None, clip=3) -> pd.DataFrame | pd.Series:
-    if median is None:
-        median = X.median()
-    X -= median
-    mad = abs(X).median() * 1.4826
-    X /= mad
-    if clip is not None:
-        X.clip(-clip, clip, inplace=True)
-    return X
-
-
-def minmaxnorm(X: pd.DataFrame | pd.Series, Min=None, Max=None, clip=3) -> pd.DataFrame | pd.Series:
-    if Min is None:
-        Min = X.min()
-    if Max is None:
-        Max = X.max()
-    X -= Min
-    X /= Max - Min
-    if clip is not None:
-        X.clip(-clip, clip, inplace=True)
-    return X
-
-
-def ranknorm(X: pd.DataFrame | pd.Series, groupby: str = None) -> pd.DataFrame | pd.Series:
-    if groupby is None:
-        X_rank = X.rank(pct=True)
-    else:
-        X_rank = X.groupby(groupby).rank(pct=True)
-    X_rank -= 0.5
-    X_rank *= 3.46
-    return X_rank
 
 
 def make_pca(X: pd.DataFrame | pd.Series) -> dict:
@@ -244,11 +196,8 @@ def make_r_scores(X: pd.DataFrame | pd.Series, y: pd.DataFrame | pd.Series) -> p
 def show_dist(X: pd.Series | pd.DataFrame) -> None:
     """
     画出数据分布(密度)
-
-    :param X:
-    :return:
     """
-    sns.kdeplot(X, shade=True)
+    kdeplot(X, shade=True)
     plt.show()
 
 
@@ -279,8 +228,6 @@ def align(x: pd.Series | pd.DataFrame, y: pd.Series | pd.DataFrame) \
     :param y: pd.DataFrame or pd.Series
     :return: pd.DataFrame(or pd.Series), pd.DataFrame(or pd.Series)
     """
-    # print(x.index.names)
-    # print(y.index.names)
     if len(x) > len(y):
         x = x[x.index.isin(y.index)]
     elif len(y) > len(x):
@@ -293,17 +240,10 @@ def percentage_missing(X: pd.Series | pd.DataFrame) -> float:
     return percent_missing
 
 
-def process_inf(X: pd.DataFrame) -> pd.DataFrame:
-    for col in X.columns:
-        X[col] = X[col].replace([np.inf, -np.inf], X[col][~np.isinf(X[col])].mean())
-    return X
-
-
 def clean(X: pd.DataFrame | pd.Series) -> pd.DataFrame | pd.Series:
     X.dropna(axis=1, how='all', inplace=True)
     X.fillna(method='ffill', inplace=True)
     X.dropna(axis=0, inplace=True)
-    # X = process_inf(X)
     return X
 
 
@@ -427,7 +367,7 @@ def group_split(X: pd.DataFrame | pd.Series, params: dict = None) -> \
 def split_data_by_date(data: pd.DataFrame | pd.Series, kwargs: dict) -> \
         tuple[pd.DataFrame | pd.Series, pd.DataFrame | pd.Series, pd.DataFrame | pd.Series]:
     """
-    按照日期拆出(整段)的测试集, 然后剩下的数据按照参数"split_method"和"split_kwargs"拆除训练集和验证机
+    按照日期拆出(整段)的测试集, 然后剩下的数据按照参数"split_method"和"split_kwargs"拆除训练集和验证集
     :param data: pd.DataFrame
     :param kwargs: dict, test_start_date必填, 其它选填. 当没指定test_end_date时, 默认截取到最后一天
     :return: pd.DataFrame
@@ -466,21 +406,40 @@ def split_data_by_date(data: pd.DataFrame | pd.Series, kwargs: dict) -> \
 ####################################################
 # 自动处理器
 ####################################################
-def auto_process(X: pd.DataFrame, y: str, groupby: str = None, norm: str = "z", label_norm: bool = True,
-                 select: bool = False, orth: bool = False, clip=3, split_params: dict = None) -> dict:
+def process_data(data: pd.DataFrame | pd.Series, norm: str = "z", decay: bool = False) -> pd.DataFrame | pd.Series:
+    """
+    inf_mask -> process_nan -> mad_winsorize -> (decay) -> normalize
+    """
+    if isinstance(data, pd.Series):
+        print("original data:")
+        single_factor_ana(data)
+    data = mad_winsor(ts_ffill(inf_mask(data)).dropna())
+    if decay:
+        data = ts_decay(data, 5).dropna()
+    if norm == "z":
+        data = cs_zscore(data)
+    elif norm == "r":
+        data = cs_robust_zscore(data)
+    elif norm == "m":
+        data = cs_scale(data)
+    else:
+        data = cs_rank(data)
+    if isinstance(data, pd.Series):
+        print("data processed:")
+        single_factor_ana(data)
+    return data
+
+
+def auto_process(X: pd.DataFrame, y: str, norm: str = "z", split_params: dict = None,
+                 label_decay: bool = False) -> dict:
     """
     :param X: pd.DataFrame，原始特征，包括了目标值
     :param y: str，目标值所在列的列名
-    :param groupby: str, 如果是面板数据则输入groupby的依据，序列数据则直接填None
     :param norm: str, 标准化方式, 可选'z'/'r'/'m'
-    :param label_norm: bool, 是否对目标值进行标准化
-    :param select: bool, 是否去除无用特征
-    :param orth: 是否正交化
-    :param clip: 是否截断特征, None为不截断, 否则按照(-clip, clip)截断
     :param split_params: dict, 划分数据集的方法
-    :return: dict{X_train, X_test, y_train, y_test, ymean, ystd}
+    :param label_decay: 是否对目标值做decay以提高unique value的占比
+    :return: dict{X_train, X_test, y_train, y_test}
     """
-    date = X.index.names[0]
     if split_params is None:
         split_params = {
             "data": X,
@@ -495,16 +454,15 @@ def auto_process(X: pd.DataFrame, y: str, groupby: str = None, norm: str = "z", 
     print(X.info())
     X_mis = percentage_missing(X)
     print('X_mis=', X_mis)
-    if groupby is None:
-        X = clean(X)
-    else:
-        X.dropna(axis=1, how='all', inplace=True)
-        X = X.groupby([groupby]).fillna(method='ffill').dropna()
-    print('clean dataset done', '\n')
+
+    label = X.pop(y)
+    feature = process_data(X, norm=norm)
+    label = process_data(label, norm=norm, decay=label_decay)
+    print("process dataset done")
 
     # 拆分数据集
-    X_train, X_valid, X_test = split_data_by_date(X, split_params)
-    y_train, y_valid, y_test = X_train.pop(y), X_valid.pop(y), X_test.pop(y)
+    X_train, X_valid, X_test = split_data_by_date(feature, split_params)
+    y_train, y_valid, y_test = split_data_by_date(label, split_params)
 
     X_train, y_train = align(X_train, y_train)
     X_valid, y_valid = align(X_valid, y_valid)
@@ -519,87 +477,6 @@ def auto_process(X: pd.DataFrame, y: str, groupby: str = None, norm: str = "z", 
         X_train = down_sample(X_train, col=y)
         print('down sample done', '\n')
 
-    # 目标值标准化
-    if label_norm:
-        if groupby is None:
-            ymean, ystd = y_train.mean(), y_train.std()
-            y_train, y_valid = zscorenorm(y_train, ymean, ystd), zscorenorm(y_valid, ymean, ystd)
-        else:
-            ymean, ystd = y_test.groupby(date).mean(), y_test.groupby(date).std()  # 是否应该使用滞后项
-            y_train = zscorenorm(y_train, y_train.groupby(date).mean(), y_train.groupby(date).std())
-            y_valid = zscorenorm(y_valid, y_valid.groupby(date).mean(), y_valid.groupby(date).std())
-        print('label norm done', '\n')
-    else:
-        ymean, ystd = None, None
-    print("The distribution of y_train:")
-    show_dist(y_train)
-    print("The distribution of y_valid:")
-    show_dist(y_valid)
-    print("The distribution of y_test:")
-    show_dist(y_test)
-
-    # 特征值标准化
-    if groupby is None:
-        if norm == 'z':
-            mean, std = X_train.mean(), X_train.std()
-            X_train = zscorenorm(X_train)
-            X_valid, X_test = zscorenorm(X_valid, mean, std, clip), zscorenorm(X_test, mean, std, clip)
-        elif norm == 'r':
-            median = X_train.median()
-            X_train = robustzscorenorm(X_train)
-            X_valid, X_test = robustzscorenorm(X_valid, median, clip), robustzscorenorm(X_test, median, clip)
-        elif norm == 'm':
-            Min, Max = X_train.min(), X_train.max()
-            X_train = minmaxnorm(X_train)
-            X_valid, X_test = minmaxnorm(X_valid, Min, Max, clip), minmaxnorm(X_test, Min, Max, clip)
-        else:
-            X_train = ranknorm(X_train)
-            X_valid, X_test = ranknorm(X_valid), ranknorm(X_test)
-        X_train = clean(X_train)
-        X_valid = clean(X_valid)
-        X_test = clean(X_test)
-    else:
-        if norm == 'z':
-            mean, std = X_train.groupby(date).mean(), X_train.groupby(date).std()
-            X_train = zscorenorm(X_train, mean, std, clip)
-            X_valid = zscorenorm(X_valid, X_valid.groupby(date).mean(), X_valid.groupby(date).std(), clip)
-            X_test = zscorenorm(X_test, X_test.groupby(date).mean(), X_test.groupby(date).std(), clip)
-        elif norm == 'r':
-            median = X_train.groupby(date).median()
-            X_train = robustzscorenorm(X_train, median, clip)
-            X_valid = robustzscorenorm(X_valid, X_valid.groupby(date).median(), clip)
-            X_test = robustzscorenorm(X_test, X_test.groupby(date).median(), clip)
-        elif norm == 'm':
-            Min, Max = X_train.groupby(date).min(), X_train.groupby(date).max()
-            X_train = minmaxnorm(X_train, Min, Max, clip)
-            X_valid = minmaxnorm(X_valid, X_valid.groupby(date).min(), X_valid.groupby(date).max(), clip)
-            X_test = minmaxnorm(X_test, X_test.groupby(date).min(), X_test.groupby(date).max(), clip)
-        else:
-            X_train = ranknorm(X_train, groupby=date)
-            X_valid = ranknorm(X_valid, groupby=date)
-            X_test = ranknorm(X_test, groupby=date)
-
-        X_train = X_train.groupby(groupby).fillna(method='ffill').dropna()
-        X_valid = X_valid.groupby(groupby).fillna(method='ffill').dropna()
-        X_test = X_test.groupby(groupby).fillna(method='ffill').dropna()
-
-    print('norm data done', '\n')
-
-    # PCA降维
-    if orth:
-        result = make_pca(X_train)
-        pca, X_train = result["pca"], result["X_train"]
-        X_valid, X_test = pca.transform(X_valid), pca.transform(X_test)
-
-    # 特征选择
-    if select:
-        mi_score = make_mi_scores(X_train, y_train)
-        print(mi_score)
-        print(mi_score.describe())
-        X_train = feature_selector(X_train, mi_score, value=0, verbose=1)
-        X_valid = feature_selector(X_valid, mi_score)
-        X_test = feature_selector(X_test, mi_score)
-
     X_train, y_train = align(X_train, y_train)
     X_valid, y_valid = align(X_valid, y_valid)
     X_test, y_test = align(X_test, y_test)
@@ -611,8 +488,6 @@ def auto_process(X: pd.DataFrame, y: str, groupby: str = None, norm: str = "z", 
         "y_valid": y_valid,
         "X_test": X_test,
         "y_test": y_test,
-        "ymean": ymean,
-        "ystd": ystd
     }
     return returns
 
@@ -646,8 +521,8 @@ def auto_lrg(x: pd.DataFrame | pd.Series, y: pd.Series | pd.DataFrame, method: s
         lasso = linear_model.Lasso(alpha=alpha, max_iter=max_iter)
         model = lasso.fit(x, y)
     elif method == 'logistic':
-        log = linear_model.LogisticRegression()
-        model = log.fit(x, y)
+        logistic = linear_model.LogisticRegression()
+        model = logistic.fit(x, y)
     return model
 
 
@@ -820,302 +695,3 @@ def ic_ana(pred: pd.Series | pd.DataFrame, y: pd.DataFrame | pd.Series, groupby:
         show_dist(ic)
     IC, ICIR, Rank_IC, Rank_ICIR = ic.mean(), ic.mean() / ic.std(), rank_ic.mean(), rank_ic.mean() / rank_ic.std()
     return IC, ICIR, Rank_IC, Rank_ICIR
-
-
-####################################################
-# 时间序列分析
-####################################################
-def roll_mean(X: pd.DataFrame, label: str, windows: int) -> pd.DataFrame:
-    """
-    :param X: pd.DataFrame, 输入的数据
-    :param label: str, 目标值的列名
-    :param windows: int, 移动窗口
-    :return: 增加了'moving_average'列的数据集
-    """
-    if windows % 2 == 0:
-        min_periods = int(0.5 * windows)
-    else:
-        min_periods = int(0.5 * windows) + 1
-    X['moving_average'] = X[label].rolling(
-        window=windows,
-        center=True,
-        min_periods=min_periods
-    ).mean()
-    return X
-
-
-def time_plot(X: pd.DataFrame, label: str) -> None:
-    """
-    :param X: pd.DataFrame, 输入的数据
-    :param label: str, 目标值所在列名
-    :return: None（画图）
-    """
-    fig, ax = plt.subplots()
-    X_copy = X.copy()
-    X_copy['time_id'] = np.arange(len(X_copy))
-    ax.plot('time_id', label, data=X_copy, color='0.75')
-    ax = sns.regplot(x='time_id', y=label, data=X_copy, ci=None,
-                     scatter_kws=dict(color='0.25'))
-    ax.set_title('Time Plot of ' + label)
-    plt.show()
-    del X_copy
-
-
-def series_plot(y: pd.DataFrame | pd.Series, pred: pd.DataFrame | pd.Series, fore: pd.DataFrame | pd.Series,
-                title: str = None, y_label: str = "value", pred_label: str = "pred", fore_label: str = "fore") -> None:
-    """
-    :param y: pd.DataFrame or pd.Series, 真实值
-    :param pred: pd.DataFrame or pd.Series, 预测值（测试集）
-    :param fore: pd.DataFrame or pd.Series, 预测值（训练集）
-    :param title: str, 图的标题
-    :param y_label: str, y的注释
-    :param pred_label: str, pred的注释
-    :param fore_label: str, fore的注释
-    :return: None（画图）
-    """
-    ax = y.plot(alpha=0.5, title=title, ylabel=y_label)
-    ax = pred.plot(ax=ax, linewidth=2, label=pred_label, color='C0')
-    ax = fore.plot(ax=ax, linewidth=2, label=fore_label, color='C3')
-    ax.legend()
-    plt.show()
-
-
-def make_trend(X: pd.DataFrame, order: int, constant: bool = False, drop_terms: bool = True) -> pd.DataFrame:
-    from statsmodels.tsa.deterministic import DeterministicProcess
-    dp = DeterministicProcess(
-        index=X.index,  # dates from the training data
-        constant=constant,  # dummy feature for the bias (y_intercept)
-        order=order,  # the time dummy (trend)
-        drop=drop_terms,  # drop terms if necessary to avoid collinearity
-    )
-    # `in_sample` creates features for the dates given in the `index` argument
-    trend = dp.in_sample()
-    return X.join(trend)
-
-
-def plot_periodogram(X: pd.DataFrame | pd.Series, time_freq: str = "3sec", detrend: str = "linear", ax=None) -> None:
-    """
-    The periodogram tells you the strength of the frequencies in a time series.
-
-    :param X: pd.DataFrame or pd.Series, 输入的数据
-    :param time_freq: str, 频率，目前只有'3sec', 'day', 'month' 和 'year'（未尝试，效果未知）
-    :param detrend: str, 除趋势
-    :param ax: 用于画图
-    :return: None(画图)
-    """
-    if time_freq == 'day':
-        fs = pd.Timedelta("1Y") / pd.Timedelta("1D")
-    elif time_freq == 'month':
-        fs = 12
-    elif time_freq == '3sec':
-        fs = 1200
-    else:
-        fs = 1
-    freqencies, spectrum = periodogram(
-        X,
-        fs=fs,
-        detrend=detrend,
-        window="boxcar",
-        scaling='spectrum',
-    )
-    if ax is None:
-        _, ax = plt.subplots()
-    ax.step(freqencies, spectrum, color="purple")
-    ax.set_xscale("log")
-    if time_freq == 'day':
-        ax.set_xticks([1, 2, 4, 6, 12, 26, 52, 104])
-        ax.set_xticklabels(
-            [
-                "Annual (1)",
-                "Semiannual (2)",
-                "Quarterly (4)",
-                "Bimonthly (6)",
-                "Monthly (12)",
-                "Biweekly (26)",
-                "Weekly (52)",
-                "Semiweekly (104)",
-            ],
-            rotation=30,
-        )
-    elif time_freq == 'month':
-        ax.set_xticks([1, 2, 4, 6, 12])
-        ax.set_xticklabels(
-            [
-                "Annual (1)",
-                "Semiannual (2)",
-                "Quarterly (4)",
-                "Bimonthly (6)",
-                "Monthly (12)",
-            ],
-            rotation=15,
-        )
-    elif time_freq == '3sec':
-        ax.set_xticks([1, 2, 4, 6, 12, 60, 120, 360, 720, 3600])
-        ax.set_xticklabels(
-            [
-                "Hour (1)",
-                "HalfanHour (2)",
-                "Quarterly (4)",
-                "10min (6)",
-                "5min(12)",
-                "1min(60)",
-                "30sec(120)",
-                "15sec(240)",
-                "6sec(600)",
-                "3sec(1200)"
-            ],
-            rotation=35,
-        )
-    else:
-        ax.set_xticks([1])
-        ax.set_xticklabels(
-            [
-                "Annual (1)",
-            ],
-            rotation=15,
-        )
-    ax.ticklabel_format(axis="y", style="sci", scilimits=(0, 0))
-    ax.set_ylabel("Variance")
-    ax.set_title("Periodogram")
-    plt.show()
-
-
-def make_fourier_features(X: pd.DataFrame, freq: int, order: int, name: str = None, time: str = None) -> pd.DataFrame:
-    """
-    傅里叶特征：假设时间为t, 频率为f, 则特征 k = (2 * pi / f) * t
-
-    :param X: pd.DataFrame, 输入的数据
-    :param freq: int, 频率
-    :param order: int, 阶数
-    :param name: str, 自定义傅里叶特征的名字
-    :param time: 表示时间的变量
-    :return: pd.DataFrame, 加入了傅里叶特征的数据集
-    """
-    if time is None:
-        time = np.arange(len(X.index), dtype=np.float32)
-    k = 2 * np.pi * (1 / freq) * time
-    features = {}
-    if name is None:
-        for i in range(1, order + 1):
-            features.update({
-                f"sin_{freq}_{i}": np.sin(i * k),
-                f"cos_{freq}_{i}": np.cos(i * k),
-            })
-    else:
-        for i in range(1, order + 1):
-            features.update({
-                f"{name}_sin_{freq}_{i}": np.sin(i * k),
-                f"{name}_cos_{freq}_{i}": np.cos(i * k),
-            })
-    fourier = pd.DataFrame(features, index=X.index)
-    return X.join(fourier)
-
-
-def lagplot(x, y=None, lag: int = 1, standardize: bool = False, ax=None):
-    from matplotlib.offsetbox import AnchoredText
-    x_ = x.shift(lag)
-    if standardize:
-        x_ = (x_ - x_.mean()) / x_.std()
-    if y is not None:
-        y_ = (y - y.mean()) / y.std() if standardize else y
-    else:
-        y_ = x
-    corr = y_.corr(x_)
-    if ax is None:
-        fig, ax = plt.subplots()
-    scatter_kws = dict(
-        alpha=0.75,
-        s=3,
-    )
-    line_kws = dict(color='C3', )
-    ax = sns.regplot(x=x_,
-                     y=y_,
-                     scatter_kws=scatter_kws,
-                     line_kws=line_kws,
-                     lowess=True,
-                     ax=ax)
-    at = AnchoredText(
-        f"{corr:.2f}",
-        prop=dict(size="large"),
-        frameon=True,
-        loc="upper left",
-    )
-    at.patch.set_boxstyle("square, pad=0.0")
-    ax.add_artist(at)
-    ax.set(title=f"Lag {lag}", xlabel=x_.name, ylabel=y_.name)
-    return ax
-
-
-def lag_plot(x: pd.DataFrame, lags: int, y=None, nrows: int = 2, **kwargs) -> None:
-    """
-    :param x: pd.DataFrame, 输入的数据集，须包含目标值
-    :param lags: int, 滞后的阶数
-    :param y: str, 目标值所在列名
-    :param nrows: int, 画图的行数
-    :param kwargs: 其它参数
-    :return: None（画图）
-    """
-    kwargs.setdefault('nrows', nrows)
-    kwargs.setdefault('ncols', math.ceil(lags / nrows))
-    kwargs.setdefault('figsize', (kwargs['ncols'] * 2, nrows * 2 + 0.5))
-    fig, axs = plt.subplots(squeeze=False, **kwargs)
-    for ax, k in zip(fig.get_axes(), range(kwargs['nrows'] * kwargs['ncols'])):
-        if k + 1 <= lags:
-            ax = lagplot(x, y, lag=k + 1, ax=ax)
-            ax.set_title(f"Lag {k + 1}", fontdict=dict(fontsize=14))
-            ax.set(xlabel="", ylabel="")
-        else:
-            ax.axis('off')
-    plt.setp(axs[-1, :], xlabel=x.name)
-    plt.setp(axs[:, 0], ylabel=y.name if y is not None else x.name)
-    fig.tight_layout(w_pad=0.1, h_pad=0.1)
-    plt.show()
-    plot_pacf(x, lags=lags, method='ywm')
-    plt.show()
-
-
-def make_lags(X: pd.DataFrame, data: pd.DataFrame | pd.Series | None, lags: int = 1, start: int = 1,
-              col: list[str] = None, name=None) -> pd.DataFrame:
-    """
-    :param X: pd.DataFrame, 整个数据集
-    :param data: pd.Series or pd.DataFrame, 目标列, 不一定要在X中
-    :param lags: int, 滞后阶数
-    :param start: int, 从第几阶开始滞后
-    :param col: list, 若需要滞后的变量不止一个, 即data为pd.DataFrame, 传入变量名的列表
-    :param name: str, 为滞后项命名
-    :return: pd.DataFrame, 加入了滞后项的数据集
-    """
-    if data is None:
-        data = X
-    if name is None:
-        for i in range(start, lags + 1):
-            if col is None:
-                X[f'sin_{i}'] = data.shift(i)
-            else:
-                for c in col:
-                    X[f'sin_{i}'] = data[c].shift(i)
-    else:
-        for i in range(start, lags + 1):
-            if col is None:
-                X[f'{name}_sin_{i}'] = data.shift(i)
-            else:
-                for c in col:
-                    X[f'{name}_sin_{i}'] = data[c].shift(i)
-    return X
-
-
-def auto_ts_ana(X: pd.DataFrame, label: str, freq: str = "3sec", windows: int = 5, lags: int = 12) -> None:
-    """
-    :param X: pd.DataFrame, 包含目标值的整个数据集
-    :param label: str, 目标值所在列名
-    :param freq: str, 周期图的频率, 可选'3sec', 'day', 'month' 和 'year'
-    :param windows: int, 移动平均窗口
-    :param lags: int, 滞后项
-    :return:
-    """
-    X_copy = X.copy()
-    X_copy = roll_mean(X_copy, label, windows)
-    time_plot(X_copy, label)
-    plot_periodogram(X_copy[label], time_freq=freq)
-    lag_plot(X_copy[label], lags)
-    del X_copy
